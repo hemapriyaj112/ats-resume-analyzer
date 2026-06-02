@@ -7,10 +7,10 @@ scores your resume against a job description using real semantic
 understanding — not just keyword matching.
 
 ## 🚀 Live Demo
-> Coming soon after deployment
+Coming soon after deployment
 
 ## 📸 Screenshot
-> Add screenshot of results page here
+ Add screenshot of results page here
 
 ## ✨ Features
 
