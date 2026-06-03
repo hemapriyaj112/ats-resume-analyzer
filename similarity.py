@@ -3,7 +3,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 import os
 os.environ["HF_HUB_DISABLE_SSL_VERIFY"] = "1"
 from sentence_transformers import SentenceTransformer, util
-model = SentenceTransformer('./models/all-MiniLM-L6-v2')
+model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 
 def compute_semantic_score(resume_sections: dict, jd_text: str) -> float:
     weights = {
