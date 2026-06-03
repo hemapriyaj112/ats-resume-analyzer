@@ -1,18 +1,27 @@
 import os
 import re
-import spacy
-import subprocess
-import sys
-from spacy.lang.en.stop_words import STOP_WORDS
 import nltk
 from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.corpus import stopwords
+from nltk.tag import pos_tag
+from nltk.chunk import ne_chunk
+from nltk.tree import Tree
+
 nltk.download('wordnet', quiet=True)
+nltk.download('punkt', quiet=True)
+nltk.download('punkt_tab', quiet=True)
+nltk.download('averaged_perceptron_tagger', quiet=True)
+nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+nltk.download('maxent_ne_chunker', quiet=True)
+nltk.download('maxent_ne_chunker_tab', quiet=True)
+nltk.download('words', quiet=True)
+nltk.download('stopwords', quiet=True)
+
 lemmatizer = WordNetLemmatizer()
 
-def load_spacy_model():
-    return spacy.load("en_core_web_sm")
-
-nlp = load_spacy_model()
+# NLTK stopwords as replacement for spaCy STOP_WORDS
+STOP_WORDS = set(stopwords.words('english'))
 
 # ── Words that are NEVER skills ────────────────────────────────────────────
 NOISE_WORDS = STOP_WORDS | {
@@ -40,12 +49,13 @@ NOISE_WORDS = STOP_WORDS | {
     "programming", "development", "analysis", "data",
     # Fine as part of bigrams but noisy solo
     "structure", "structures", "control", "version",
-    # Extra HR noise that leaks through spaCy NER / noun chunks
+    # Extra HR noise that leaks through NER / noun chunks
     "engineering", "requirement", "requirements", "qualification",
     "qualifications", "enrol", "enrollment",
 }
 
-VALID_ENT_TYPES = {"ORG", "PRODUCT", "GPE", "LANGUAGE", "WORK_OF_ART", "EVENT"}
+# NLTK NE chunk labels that correspond to useful entity types
+VALID_NE_TYPES = {"ORGANIZATION", "GPE", "FACILITY", "GSP"}
 
 TECH_WHITELIST = {
     # Languages
@@ -138,9 +148,7 @@ def _validate_ambiguous_skill(skill: str, text: str, skills_section: str = "") -
     """
     if skill not in AMBIGUOUS_SKILLS:
         return True
-    
-    # For ambiguous skills, use word boundary matching to avoid substring matches
-    # e.g., "go" should not match in "Google" or "going"
+
     pattern = rf"\b{re.escape(skill)}\b"
     return bool(re.search(pattern, text, re.IGNORECASE))
 
@@ -180,7 +188,6 @@ DISPLAY_OVERRIDES = {
     "software development": "Software Development",
     "analytical skills": "Analytical Skills",
     "algorithm development": "Algorithm Development",
-    # Conceptual skills
     "firebase": "Firebase",
     "internship": "Internship", "internship(s": "Internship(s", "internships": "Internships",
     "intern": "Intern",
@@ -196,8 +203,7 @@ DISPLAY_OVERRIDES = {
     "ai tools": "AI Tools", "google colab": "Google Colab",
 }
 
-# ── Pure section-header lines — dropped entirely so their words don't
-#    appear as extracted keywords (e.g. "Qualifications", "Requirements")
+# ── Pure section-header lines — dropped entirely
 _HEADER_LINE = re.compile(
     r"^\s*(basic qualifications?|minimum qualifications?|preferred qualifications?|"
     r"education requirements?|equal opportunity|eeo statement|compensation|"
@@ -207,7 +213,7 @@ _HEADER_LINE = re.compile(
     re.IGNORECASE,
 )
 
-# ── Sections where ALL content is skipped (not just the header line)
+# ── Sections where ALL content is skipped
 _SKIP_SECTION = re.compile(
     r"^\s*(equal opportunity|eeo statement|compensation|benefits?|"
     r"about us|who we are|our values?|what we offer|why join|perks?|"
@@ -215,23 +221,19 @@ _SKIP_SECTION = re.compile(
     re.IGNORECASE,
 )
 
-# ── Patterns that disqualify a candidate phrase entirely ──────────────────
-# Catches: "Internship(s", "internship(s)", parenthetical fragments,
-# multi-field education strings like "Computer Science Computer Engineering"
+# ── Patterns that disqualify a candidate phrase entirely
 _BAD_FRAGMENT = re.compile(
-    r"\bqualifications?\b"       # "qualifications" / "qualification"
-    r"|\brequirements?\b"        # "requirements" / "requirement"
-    r"|\binternships?\b"           # standalone "internship"
-    r"|\(s\b"                    # "(s" — broken plurals
-    r"|\bengineer(ing)?\b"       # "engineering", "engineer" (too generic)
-    r"|\benroll(ment|ed)?\b"     # enrollment noise
-    r"|\bmust\b|\bage\b"         # "must be 18" fragments
+    r"\bqualifications?\b"
+    r"|\brequirements?\b"
+    r"|\binternships?\b"
+    r"|\(s\b"
+    r"|\bengineer(ing)?\b"
+    r"|\benroll(ment|ed)?\b"
+    r"|\bmust\b|\bage\b"
     r"|\bolder\b|\byears?\b",
     re.IGNORECASE,
 )
 
-# Phrases that look like "Computer Science Computer Engineering" —
-# two or more proper-noun education-field tokens concatenated
 _EDUCATION_FIELD = re.compile(
     r"computer\s+(science|engineering)|"
     r"data\s+science\s+information|"
@@ -243,12 +245,9 @@ _EDUCATION_FIELD = re.compile(
 
 def _strip_boilerplate(text: str) -> str:
     """
-    - Drop pure section-header lines (Basic Qualifications etc.) so their
-      words don't pollute keyword extraction.
-    - Skip entire irrelevant sections (EEO, benefits, About Us) until the
-      next blank line.
-    - Keep content inside qualification/responsibility sections — that's
-      where the actual skills live.
+    - Drop pure section-header lines so their words don't pollute extraction.
+    - Skip entire irrelevant sections until the next blank line.
+    - Keep content inside qualification/responsibility sections.
     """
     lines = text.split("\n")
     cleaned = []
@@ -266,7 +265,6 @@ def _strip_boilerplate(text: str) -> str:
             skip = True
             continue
 
-        # Drop header lines themselves (don't skip content below them)
         if _HEADER_LINE.match(stripped):
             continue
 
@@ -279,40 +277,30 @@ def _strip_boilerplate(text: str) -> str:
 def _clean_phrase(text: str) -> str:
     """Clean phrase by removing punctuation artifacts and normalizing."""
     text = text.lower().strip()
-    # Protect known programming language names from punctuation stripping
     if text in PROTECTED_TERMS:
         return text
-    # Remove all non-alphanumeric characters except hyphens between words
     text = re.sub(r"[^\w\s\-]", "", text)
-    # Remove extra whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
 def _is_noise(phrase: str) -> bool:
     """Returns True if phrase should be discarded."""
-    # Clean the phrase first to remove punctuation artifacts
     cleaned = re.sub(r"[^\w\s\-]", "", phrase).strip()
-    
-    # Reject if too short after cleaning
+
     if len(cleaned) < 3:
         return True
-    
+
     words = cleaned.split()
 
-    # All words are noise
     if all(w in NOISE_WORDS for w in words):
         return True
-    # Single noise word
     if len(words) == 1 and words[0] in NOISE_WORDS:
         return True
-    # Contains a bad fragment pattern
     if _BAD_FRAGMENT.search(phrase):
         return True
-    # Looks like an education-field concatenation (not a skill)
     if _EDUCATION_FIELD.search(phrase):
         return True
-    # Reject phrases longer than 3 words (almost always sentence fragments)
     if len(words) > 3:
         return True
 
@@ -330,15 +318,8 @@ def _format_keyword(kw: str) -> str:
 
 
 def _normalize_keyword(kw: str) -> str:
-    """
-    Normalize keyword by:
-    1. Converting to lowercase
-    2. Stripping punctuation and extra whitespace
-    3. Applying lemmatization
-    """
-    # Clean the keyword (lowercase, strip punctuation/whitespace)
+    """Normalize keyword: lowercase, strip punctuation, lemmatize."""
     cleaned = _clean_phrase(kw)
-    # Apply lemmatization to each word
     words = cleaned.split()
     lemmatized_words = [lemmatizer.lemmatize(w) for w in words]
     return " ".join(lemmatized_words)
@@ -354,6 +335,78 @@ def _deduplicate(keywords: set) -> set:
     return keywords - unigrams_to_drop
 
 
+def _extract_ne_chunks(text: str) -> set:
+    """
+    Replaces spaCy NER (Step 2).
+    Uses NLTK's ne_chunk to extract named entities of useful types.
+    """
+    keywords = set()
+    try:
+        sentences = sent_tokenize(text)
+        for sent in sentences:
+            tokens = word_tokenize(sent)
+            tagged = pos_tag(tokens)
+            chunked = ne_chunk(tagged, binary=False)
+            for subtree in chunked:
+                if isinstance(subtree, Tree) and subtree.label() in VALID_NE_TYPES:
+                    entity = " ".join(word.lower() for word, tag in subtree.leaves())
+                    kw = _clean_phrase(entity)
+                    if kw and not _is_noise(kw) and len(kw) > 2:
+                        keywords.add(kw)
+    except Exception:
+        pass
+    return keywords
+
+
+def _extract_noun_bigrams(text: str) -> set:
+    """
+    Replaces spaCy noun chunks (Step 3).
+    Extracts 2-word noun phrases using NLTK POS tags (NN, NNS, NNP, NNPS).
+    """
+    keywords = set()
+    noun_tags = {"NN", "NNS", "NNP", "NNPS"}
+    try:
+        sentences = sent_tokenize(text)
+        for sent in sentences:
+            tokens = word_tokenize(sent)
+            tagged = pos_tag(tokens)
+            for i in range(len(tagged) - 1):
+                w1, t1 = tagged[i]
+                w2, t2 = tagged[i + 1]
+                if t1 in noun_tags and t2 in noun_tags:
+                    l1 = lemmatizer.lemmatize(w1.lower())
+                    l2 = lemmatizer.lemmatize(w2.lower())
+                    if l1 not in NOISE_WORDS and l2 not in NOISE_WORDS:
+                        phrase = _clean_phrase(f"{l1} {l2}")
+                        if not _is_noise(phrase):
+                            keywords.add(phrase)
+    except Exception:
+        pass
+    return keywords
+
+
+def _extract_nouns(text: str) -> set:
+    """
+    Replaces spaCy single NOUN/PROPN tokens (Step 4).
+    Extracts individual noun tokens using NLTK POS tags.
+    """
+    keywords = set()
+    noun_tags = {"NN", "NNS", "NNP", "NNPS"}
+    try:
+        sentences = sent_tokenize(text)
+        for sent in sentences:
+            tokens = word_tokenize(sent)
+            tagged = pos_tag(tokens)
+            for word, tag in tagged:
+                if tag in noun_tags:
+                    lemma = lemmatizer.lemmatize(word.lower())
+                    if lemma not in NOISE_WORDS and len(lemma) > 2:
+                        keywords.add(lemma)
+    except Exception:
+        pass
+    return keywords
+
+
 def extract_keywords(text: str) -> list[str]:
     """
     Extracts skill/technology keywords from a job description or resume.
@@ -361,9 +414,9 @@ def extract_keywords(text: str) -> list[str]:
     Steps:
       1. Strip boilerplate (header lines + irrelevant sections)
       2. Whitelist scan — catches known multi-word tech terms reliably
-      3. spaCy NER — product/org/language entities
-      4. Noun chunks — 2-word max, both words must pass noise filter
-      5. Single NOUN/PROPN tokens — noise-filtered
+      3. NLTK NER — organization/location entities (replaces spaCy NER)
+      4. Noun bigrams — 2-word noun pairs, both words must pass noise filter
+      5. Single noun tokens — noise-filtered
       6. Deduplicate — remove unigrams subsumed by bigrams
       7. Remove generic HR phrases
       8. Normalize keywords (lowercase, strip punctuation, lemmatize)
@@ -378,7 +431,6 @@ def extract_keywords(text: str) -> list[str]:
     # Step 1 — whitelist scan (most reliable for multi-word tech terms)
     for term in TECH_WHITELIST:
         escaped = re.escape(term)
-        # For ambiguous short skills, use strict word boundary matching
         if term in AMBIGUOUS_SKILLS:
             if re.search(rf"\b{escaped}\b", text_lower):
                 keywords.add(term)
@@ -386,36 +438,14 @@ def extract_keywords(text: str) -> list[str]:
             if re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", text_lower):
                 keywords.add(term)
 
-    # Step 2 — spaCy NER
-    doc = nlp(stripped)
-    for ent in doc.ents:
-        if ent.label_ in VALID_ENT_TYPES:
-            kw = _clean_phrase(ent.text)
-            if kw and not _is_noise(kw) and len(kw) > 2:
-                keywords.add(kw)
+    # Step 2 — NLTK NER (replaces spaCy NER)
+    keywords |= _extract_ne_chunks(stripped)
 
-    # Step 3 — Noun chunks, max 2 words
-    for chunk in doc.noun_chunks:
-        words = [t for t in chunk if not t.is_punct and not t.is_space]
-        if len(words) == 2:
-            w1 = words[0].lemma_.lower()
-            w2 = words[1].lemma_.lower()
-            if w1 not in NOISE_WORDS and w2 not in NOISE_WORDS:
-                phrase = _clean_phrase(f"{w1} {w2}")
-                if not _is_noise(phrase):
-                    keywords.add(phrase)
+    # Step 3 — Noun bigrams (replaces spaCy noun chunks)
+    keywords |= _extract_noun_bigrams(stripped)
 
-    # Step 4 — single NOUN/PROPN tokens
-    for token in doc:
-        if (
-            token.pos_ in {"NOUN", "PROPN"}
-            and not token.is_stop
-            and not token.is_punct
-            and not token.is_space
-        ):
-            lemma = token.lemma_.lower()
-            if lemma not in NOISE_WORDS and len(lemma) > 2:
-                keywords.add(lemma)
+    # Step 4 — Single noun tokens (replaces spaCy NOUN/PROPN tokens)
+    keywords |= _extract_nouns(stripped)
 
     # Step 5 — deduplicate and strip generic phrases
     keywords = _deduplicate(keywords)
