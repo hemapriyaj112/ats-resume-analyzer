@@ -51,7 +51,11 @@ NOISE_WORDS = STOP_WORDS | {
     "structure", "structures", "control", "version",
     # Extra HR noise that leaks through NER / noun chunks
     "engineering", "requirement", "requirements", "qualification",
-    "qualifications", "enrol", "enrollment",
+    "qualifications", "enrol", "enrollment", "must", "following", "follow", 
+    "also", "well", "least", "within", "across", "per", "via", "based", 
+    "using", "used", "including", "etc", "e.g", "i.e", "such", 
+    "like", "known", "given", "provide",
+    "provided", "ensure", "ensuring", "support", "supporting",
 }
 
 # NLTK NE chunk labels that correspond to useful entity types
