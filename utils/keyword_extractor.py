@@ -1,17 +1,26 @@
+import os
 import re
 import spacy
+import subprocess
+import sys
 from spacy.lang.en.stop_words import STOP_WORDS
 import nltk
 from nltk.stem import WordNetLemmatizer
 nltk.download('wordnet', quiet=True)
 lemmatizer = WordNetLemmatizer()
 
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    from spacy.cli import download
-    download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+def load_spacy_model():
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        subprocess.run(
+            [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
+            check=True,
+            env={**os.environ, "PIP_USER": "false"}
+        )
+        return spacy.load("en_core_web_sm")
+
+nlp = load_spacy_model()
 
 # ── Words that are NEVER skills ────────────────────────────────────────────
 NOISE_WORDS = STOP_WORDS | {
