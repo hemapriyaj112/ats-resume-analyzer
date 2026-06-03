@@ -10,15 +10,7 @@ nltk.download('wordnet', quiet=True)
 lemmatizer = WordNetLemmatizer()
 
 def load_spacy_model():
-    try:
-        return spacy.load("en_core_web_sm")
-    except OSError:
-        subprocess.run(
-            [sys.executable, "-m", "spacy", "download", "en_core_web_sm"],
-            check=True,
-            env={**os.environ, "PIP_USER": "false"}
-        )
-        return spacy.load("en_core_web_sm")
+    return spacy.load("en_core_web_sm")
 
 nlp = load_spacy_model()
 
